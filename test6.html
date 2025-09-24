@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="et">
+<head>
+  <meta charset="utf-8" />
+  <title>Avalikud punktid Eestis — with username auth + Firestore</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <style>
+    body { background: linear-gradient(180deg, #0f172a 0%, #1e3a8a 50%, #0f172a 100%); }
+    #map { height: 600px; border-radius: 2rem; overflow: hidden; transition: all .3s; }
+    #map.fullscreen { position: fixed !important; top:0;left:0;right:0;bottom:0;height:100%!important;width:100%!important;border-radius:0!important;z-index:50;}
+    .leaflet-popup-content-wrapper { background: linear-gradient(135deg,#0f172a,#1e3a8a); color:white; border-radius:15px; padding:10px;}
+    .leaflet-popup-tip { background:#1e3a8a; }
+    img.preview { max-width:220px; border-radius:10px; margin-top:8px;}
+    #fullscreenBtn { position:absolute; top:10px; right:10px; z-index:1000; }
+    #loginBox { position:absolute; top:10px; right:70px; z-index:1001; }
+  </style>
+</head>
+<body class="text-white flex flex-col items-center p-4">
+
+  <!-- LOGIN (username + password) -->
+  <div id="loginBox" class="bg-black/60 px-3 py-2 rounded-xl text-sm flex items-center gap-2">
+    <input id="username" type="text" placeholder="Kasutajanimi (a-z0-9._-)" class="p-1 rounded text-black" />
+    <input id="password" type="password" placeholder="Parool" class="p-1 rounded text-black" />
+    <button id="loginBtn" class="bg-blue-700 hover:bg-blue-900 text-white px-2 py-1 rounded">Logi sisse</button>
+    <button id="signupBtn" class="bg-green-700 hover:bg-green-900 text-white px-2 py-1 rounded">Loo konto</button>
+    <span id="loggedIn" class="hidden">
+      <span id="userDisplay" class="font-bold text-blue-300"></span>
+      <button id="logoutBtn" class="ml-2 bg-red-600 hover:bg-red-800 text-white px-2 py-1 rounded">Logi välja</button>
+    </span>
+  </div>
+
+  <div class="w-full max-w-4xl mx-auto relative">
+    <div id="map" class="shadow-xl border-4 border-black"></div>
+    <button id="fullscreenBtn" class="bg-black/50 hover:bg-black text-white px-3 py-1 rounded-lg shadow">⬆️ Täisekraan</button>
+  </div>
+
+  <!-- FORM -->
+  <div id="formWrapper" class="mt-5 bg-black/40 backdrop-blur-md border border-blue-800 p-5 rounded-2xl shadow-lg w-full max-w-2xl">
+    <h2 class="text-xl font-bold text-blue-300 mb-4">➕ Lisa uus punkt</h2>
+
+    <label class="block mb-2 font-semibold">Tüüp:</label>
+    <select id="type" class="w-full p-2 rounded-lg mb-3 text-black">
+      <option value="water">💧 Veevõtukoht</option>
+      <option value="wc">🚻 WC</option>
+      <option value="bike">🚴 Jalgrattarada</option>
+    </select>
+
+    <label class="block mb-2 font-semibold">Kirjeldus:</label>
+    <textarea id="desc" class="w-full p-2 rounded-lg mb-3 text-black"></textarea>
+
+    <div id="hoursWrapper">
+      <label class="block mb-2 font-semibold">Lahtioleku aeg:</label>
+      <input type="text" id="hours" placeholder="nt 08:00 - 22:00" class="w-full p-2 rounded-lg mb-3 text-black"/>
+    </div>
+
+    <label class="block mb-2 font-semibold">Tasuline?</label>
+    <select id="paid" class="w-full p-2 rounded-lg mb-3 text-black">
+      <option value="ei">Ei</option>
+      <option value="jah">Jah</option>
+    </select>
+
+    <label class="block mb-2 font-semibold">Pilt:</label>
+    <input type="file" id="image" class="w-full mb-4"/>
+
+    <button onclick="enableAdd()" class="w-full bg-gradient-to-r from-blue-600 to-blue-900 hover:from-blue-700 hover:to-blue-950 text-white p-3 rounded-xl font-semibold shadow-lg">📍 Kliki kaardile</button>
+  </div>
+
+  <!-- Firebase compat SDKs (compat ensures firebase.auth() & .firestore() usage) -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+  <!-- Leaflet -->
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <script>
+    // -----------------------
+    // Replace this firebaseConfig with yours if different.
+    // You already shared yours; it's used here:
+    // -----------------------
+    const firebaseConfig = {
+      apiKey: "AIzaSyD6pVajYAaGPYPXVLltjfqMK9XCFrwyu2w",
+      authDomain: "kaart-b5ae5.firebaseapp.com",
+      projectId: "kaart-b5ae5",
+      storageBucket: "kaart-b5ae5.appspot.com",
+      messagingSenderId: "766427159154",
+      appId: "1:766427159154:web:08cf0a0bc3fa96f9cf40eb",
+      measurementId: "G-VZC4E90GJS"
+    };
+
+    // Firebase init (compat)
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    // -----------------------
+    // Leaflet map & base data
+    // -----------------------
+    const estoniaBounds = L.latLngBounds([57.5, 21.5], [59.8, 28.3]);
+    const map = L.map('map', { maxBounds: estoniaBounds, minZoom: 6 }).setView([58.5953, 25.0136], 7);
+
+    L.tileLayer('https://cartodb-basemaps-a.global.ssl.fastly.net/light_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap & CARTO',
+      subdomains: 'abcd',
+      maxZoom: 19
+    }).addTo(map);
+
+    const basePoints = [
+      { lat: 59.437, lng: 24.7536, type: "bike", desc: "Tallinna rattarada" },
+      { lat: 58.378, lng: 26.732, type: "bike", desc: "Tartu rattarada" }
+    ];
+
+    // app state
+    let currentUser = null;
+    let currentUsername = null; // lowercase username string
+    let adding = false;
+    let userPoints = [];
+
+    function iconLabel(type) {
+      if (type === "water") return "💧 Veevõtukoht";
+      if (type === "wc") return "🚻 WC";
+      return "🚴 Jalgrattarada";
+    }
+
+    function renderPoint(p, removable = false) {
+      const marker = L.marker([p.lat, p.lng]).addTo(map);
+      let html = `<div><p class="font-bold">${iconLabel(p.type)}</p><p class="italic">${p.desc}</p>`;
+      if (p.type !== "bike") html += `<p>⏰ ${p.hours || "Pole määratud"}</p>`;
+      if (p.paid) html += `<p>💰 Tasuline: ${p.paid}</p>`;
+      if (p.image) html += `<img src="${p.image}" class="preview"/>`;
+      if (removable && p.id) {
+        html += `<button onclick="removePoint('${p.id}')" class="mt-2 bg-red-600 px-2 py-1 rounded">❌ Eemalda</button>`;
+      }
+      html += `</div>`;
+      marker.bindPopup(html);
+    }
+
+    function renderPoints() {
+      // Remove previous markers
+      map.eachLayer(l => { if (l instanceof L.Marker) map.removeLayer(l); });
+      basePoints.forEach(p => renderPoint(p, false));
+      if (currentUser) userPoints.forEach(p => renderPoint(p, true));
+    }
+
+    // Load current user's points from Firestore
+    async function loadUserPoints() {
+      if (!currentUser) return;
+      try {
+        const snapshot = await db.collection("points").where("uid", "==", currentUser.uid).get();
+        userPoints = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        renderPoints();
+      } catch (err) {
+        console.error("loadUserPoints error:", err);
+        alert("Tõrge punktide laadimisel: " + err.message);
+      }
+    }
+
+    // Save a point to Firestore
+    async function savePointToDB(point) {
+      if (!currentUser) { alert("Logi sisse!"); return; }
+      try {
+        const data = { ...point, uid: currentUser.uid, username: currentUsername || null, createdAt: firebase.firestore.FieldValue.serverTimestamp() };
+        await db.collection("points").add(data);
+        await loadUserPoints();
+      } catch (err) {
+        console.error("savePointToDB error:", err);
+        alert("Tõrge punkti salvestamisel: " + err.message);
+      }
+    }
+
+    // Remove a point by document id
+    async function removePoint(id) {
+      if (!currentUser) return;
+      try {
+        await db.collection("points").doc(id).delete();
+        await loadUserPoints();
+      } catch (err) {
+        console.error("removePoint error:", err);
+        alert("Tõrge punkti eemaldamisel: " + err.message);
+      }
+    }
+    // expose removePoint to global scope for onclick in popup
+    window.removePoint = removePoint;
+
+    // Add-point workflow
+    function enableAdd() {
+      if (!currentUser) { alert("Palun logi sisse, et punkte lisada!"); return; }
+      adding = true;
+      alert("👉 Kliki kaardile, kuhu soovid punkti lisada.");
+    }
+
+    map.on("click", function (e) {
+      if (!adding || !currentUser) return;
+      const type = document.getElementById("type").value;
+      const desc = document.getElementById("desc").value.trim();
+      const hours = document.getElementById("hours").value.trim();
+      const paid = document.getElementById("paid").value;
+      const file = document.getElementById("image").files[0];
+
+      if (!desc) { alert("Palun lisa kirjeldus!"); return; }
+
+      const savePoint = (imgData) => {
+        const newPoint = { lat: e.latlng.lat, lng: e.latlng.lng, type, desc, hours, paid, image: imgData };
+        savePointToDB(newPoint);
+      };
+
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = evt => savePoint(evt.target.result);
+        reader.readAsDataURL(file);
+      } else {
+        savePoint(null);
+      }
+
+      adding = false;
+    });
+
+    // UI: hide hours when bike selected
+    document.getElementById("type").addEventListener("change", function () {
+      document.getElementById("hoursWrapper").style.display = this.value === "bike" ? "none" : "block";
+    });
+
+    // Fullscreen toggle
+    const mapEl = document.getElementById("map");
+    const fsBtn = document.getElementById("fullscreenBtn");
+    let fullscreen = false;
+    fsBtn.addEventListener("click", () => {
+      fullscreen = !fullscreen;
+      if (fullscreen) {
+        mapEl.classList.add("fullscreen");
+        fsBtn.innerText = "⬇️ Väiksemaks";
+      } else {
+        mapEl.classList.remove("fullscreen");
+        fsBtn.innerText = "⬆️ Täisekraan";
+      }
+      setTimeout(() => map.invalidateSize(), 200);
+    });
+
+    // Mobile auto fullscreen (optional)
+    window.addEventListener("load", () => {
+      if (window.innerWidth < 768) {
+        mapEl.classList.add("fullscreen");
+        fsBtn.innerText = "⬇️ Väiksemaks";
+        setTimeout(() => map.invalidateSize(), 200);
+      }
+    });
+
+    // -----------------------
+    // AUTH: username + password signup (with uniqueness check using a transaction)
+    // -----------------------
+    const usernameInput = document.getElementById("username");
+    const passwordInput = document.getElementById("password");
+    const loginBtn = document.getElementById("loginBtn");
+    const signupBtn = document.getElementById("signupBtn");
+    const logoutBtn = document.getElementById("logoutBtn");
+    const loggedInBox = document.getElementById("loggedIn");
+    const userDisplay = document.getElementById("userDisplay");
+
+    // Username rules: only allow a-z0-9._- and length 3-20
+    const USERNAME_REGEX = /^[a-z0-9._-]{3,20}$/;
+
+    // SIGNUP: create Auth user, then create username doc inside a transaction.
+    signupBtn.addEventListener("click", async () => {
+      const raw = usernameInput.value.trim();
+      const username = raw.toLowerCase();
+      const password = passwordInput.value;
+
+      if (!raw || !password) { alert("Täida kasutajanimi ja parool!"); return; }
+      if (!USERNAME_REGEX.test(username)) { alert("Kasutajanimi peab olema 3-20 märki, ainult a-z 0-9 . _ -"); return; }
+
+      try {
+        // quick availability check
+        const usernameDocRef = db.collection("usernames").doc(username);
+        const snap = await usernameDocRef.get();
+        if (snap.exists) { alert("Kasutajanimi on juba kasutusel — vali teine."); return; }
+
+        // create firebase auth user (fake email required)
+        const fakeEmail = username + "@kaart.ee";
+        const userCred = await auth.createUserWithEmailAndPassword(fakeEmail, password);
+        const user = userCred.user;
+
+        // transaction: create the username doc only if still not exists
+        try {
+          await db.runTransaction(async (t) => {
+            const uRef = db.collection("usernames").doc(username);
+            const uSnap = await t.get(uRef);
+            if (uSnap.exists) throw new Error("TAKEN");
+            t.set(uRef, {
+              uid: user.uid,
+              username: username,
+              createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            });
+          });
+
+          alert("Konto loodud! Oled sisse logitud.");
+          // auth state handler will set UI and load points
+        } catch (tranErr) {
+          // If transaction failed because another user took it between our check and set:
+          if (tranErr.message === "TAKEN") {
+            // delete the newly created auth user to avoid leaked accounts with same fakeEmail
+            try { await auth.currentUser.delete(); } catch (e) { console.warn("Could not delete user:", e); }
+            alert("Kasutajanimi võeti kohe ära — proovi uuesti.");
+          } else {
+            // other transaction error -> remove auth user to avoid ghost accounts
+            try { await auth.currentUser.delete(); } catch (e) { console.warn("Could not delete user:", e); }
+            console.error(tranErr);
+            alert("Tekkis viga: " + tranErr.message);
+          }
+        }
+      } catch (err) {
+        console.error("signup error:", err);
+        alert("Viga: " + err.message);
+      }
+    });
+
+    // LOGIN: sign in using fake email username@kaart.ee
+    loginBtn.addEventListener("click", async () => {
+      const raw = usernameInput.value.trim();
+      const username = raw.toLowerCase();
+      const password = passwordInput.value;
+      if (!raw || !password) { alert("Täida kasutajanimi ja parool!"); return; }
+      try {
+        const fakeEmail = username + "@kaart.ee";
+        await auth.signInWithEmailAndPassword(fakeEmail, password);
+      } catch (err) {
+        console.error("login error:", err);
+        alert("Sisselogimine ebaõnnestus: " + err.message);
+      }
+    });
+
+    logoutBtn.addEventListener("click", async () => {
+      try { await auth.signOut(); } catch (e) { console.warn(e); }
+    });
+
+    // AUTH STATE: adapt UI and load user-specific points
+    auth.onAuthStateChanged(async (user) => {
+      if (user) {
+        currentUser = user;
+        // lookup username doc for this uid
+        try {
+          const q = await db.collection("usernames").where("uid", "==", user.uid).get();
+          if (!q.empty) {
+            currentUsername = q.docs[0].id; // doc id is the username (lowercase)
+          } else {
+            // fallback: derive from email
+            currentUsername = (user.email || "").split("@")[0];
+          }
+        } catch (err) {
+          console.error("finding username doc:", err);
+          currentUsername = (user.email || "").split("@")[0];
+        }
+
+        // update UI
+        usernameInput.classList.add("hidden");
+        passwordInput.classList.add("hidden");
+        loginBtn.classList.add("hidden");
+        signupBtn.classList.add("hidden");
+        loggedInBox.classList.remove("hidden");
+        userDisplay.textContent = currentUsername;
+        await loadUserPoints();
+      } else {
+        currentUser = null;
+        currentUsername = null;
+        usernameInput.classList.remove("hidden");
+        passwordInput.classList.remove("hidden");
+        loginBtn.classList.remove("hidden");
+        signupBtn.classList.remove("hidden");
+        loggedInBox.classList.add("hidden");
+        userPoints = [];
+        renderPoints();
+      }
+    });
+
+    // initial render
+    renderPoints();
+
+  </script>
+</body>
+</html>
